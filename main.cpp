@@ -3,6 +3,7 @@
 #include <fstream>
 #include <filesystem>
 #include "watermark.h"
+#include <iomanip>
 
 void printUsage(const std::string& programName) {
     std::cout << "Border-Hash Based Text Watermarking (CUDA Version)" << std::endl;
@@ -13,6 +14,12 @@ void printUsage(const std::string& programName) {
     std::cout << "  --output PATH          Path to save output image (required for embed mode)" << std::endl;
     std::cout << "  --message TEXT         Text message to embed (required for embed mode)" << std::endl;
     std::cout << "  --help                 Show this help message" << std::endl;
+}
+
+void printTimingInfo(const TimingInfo& timing) {
+    std::cout << "Timing Information:" << std::endl;
+    std::cout << "  GPU execution time:  " << std::fixed << std::setprecision(2) << timing.gpuTime << " ms" << std::endl;
+    std::cout << "  Total execution time: " << std::fixed << std::setprecision(2) << timing.totalTime << " ms" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -100,12 +107,14 @@ int main(int argc, char* argv[]) {
     
     try {
         if (mode == "embed") {
-            int bitsEmbedded = embedMessage(inputPath, outputPath, message);
+            TimingInfo timing = embedMessage(inputPath, outputPath, message);
             std::cout << "Success: Message embedded into '" << outputPath << "'" << std::endl;
-            std::cout << "Message length: " << message.length() << " characters (" << bitsEmbedded << " bits)" << std::endl;
+            std::cout << "Message length: " << message.length() << " characters (" << message.length() * 8 << " bits)" << std::endl;
+            printTimingInfo(timing);
         } else if (mode == "extract") {
-            std::string extractedMessage = extractMessage(inputPath);
+            auto [extractedMessage, timing] = extractMessage(inputPath);
             std::cout << "Extracted message: " << extractedMessage << std::endl;
+            printTimingInfo(timing);
         }
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

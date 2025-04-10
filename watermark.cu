@@ -9,6 +9,13 @@
 #include <openssl/sha.h>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
+
+// Structure to hold timing information
+struct TimingInfo {
+    float gpuTime; // GPU execution time in milliseconds
+    float totalTime; // Total execution time in milliseconds
+};
 
 // Structure to hold pixel position
 struct PixelPosition {
@@ -139,7 +146,16 @@ std::vector<PixelPosition> generatePseudoRandomPositions(const std::string& hash
 }
 
 // Function to embed a message into an image
-int embedMessage(const std::string& inputPath, const std::string& outputPath, const std::string& message) {
+TimingInfo embedMessage(const std::string& inputPath, const std::string& outputPath, const std::string& message) {
+    // Start measuring total time
+    auto startTotal = std::chrono::high_resolution_clock::now();
+    
+    // Create CUDA events for GPU timing
+    cudaEvent_t startGPU, stopGPU;
+    cudaEventCreate(&startGPU);
+    cudaEventCreate(&stopGPU);
+    float gpuElapsedTime = 0.0f;
+    
     // Load the image
     cv::Mat image = cv::imread(inputPath);
     if (image.empty()) {
@@ -205,8 +221,16 @@ int embedMessage(const std::string& inputPath, const std::string& outputPath, co
     int blockSize = 256;
     int gridSize = (totalBits + blockSize - 1) / blockSize;
     
+    // Start GPU timing
+    cudaEventRecord(startGPU);
+    
     // Launch kernel
     embedBitsKernel<<<gridSize, blockSize>>>(d_image, width, height, d_positions, d_data, totalBits);
+    
+    // End GPU timing
+    cudaEventRecord(stopGPU);
+    cudaEventSynchronize(stopGPU);
+    cudaEventElapsedTime(&gpuElapsedTime, startGPU, stopGPU);
     
     // Copy the result back to host
     cudaMemcpy(flatImage.data(), d_image, flatImage.size() * sizeof(unsigned char), cudaMemcpyDeviceToHost);
@@ -227,6 +251,10 @@ int embedMessage(const std::string& inputPath, const std::string& outputPath, co
     cudaFree(d_positions);
     cudaFree(d_data);
     
+    // Destroy CUDA events
+    cudaEventDestroy(startGPU);
+    cudaEventDestroy(stopGPU);
+    
     // Save the watermarked image (ensuring PNG format)
     std::string finalOutputPath = outputPath;
     if (finalOutputPath.substr(finalOutputPath.find_last_of(".") + 1) != "png") {
@@ -239,12 +267,30 @@ int embedMessage(const std::string& inputPath, const std::string& outputPath, co
     
     cv::imwrite(finalOutputPath, image, compressionParams);
     
+    // End total time measurement
+    auto endTotal = std::chrono::high_resolution_clock::now();
+    float totalElapsedTime = std::chrono::duration<float, std::milli>(endTotal - startTotal).count();
+    
     std::cout << "DEBUG: Embedded message length: " << messageLength << " bytes" << std::endl;
-    return messageLength * 8;
+    
+    TimingInfo timing;
+    timing.gpuTime = gpuElapsedTime;
+    timing.totalTime = totalElapsedTime;
+    
+    return timing;
 }
 
 // Function to extract a message from a watermarked image
-std::string extractMessage(const std::string& inputPath) {
+std::pair<std::string, TimingInfo> extractMessage(const std::string& inputPath) {
+    // Start measuring total time
+    auto startTotal = std::chrono::high_resolution_clock::now();
+    
+    // Create CUDA events for GPU timing
+    cudaEvent_t startGPU, stopGPU;
+    cudaEventCreate(&startGPU);
+    cudaEventCreate(&stopGPU);
+    float gpuElapsedTime = 0.0f;
+    
     // Load the watermarked image
     cv::Mat image = cv::imread(inputPath);
     if (image.empty()) {
@@ -289,6 +335,9 @@ std::string extractMessage(const std::string& inputPath) {
     int blockSize = 256;
     int gridSize = (headerBits + blockSize - 1) / blockSize;
     
+    // Start GPU timing
+    cudaEventRecord(startGPU);
+    
     // Launch kernel to extract header bits
     extractBitsKernel<<<gridSize, blockSize>>>(d_image, width, height, d_positions, d_bits, headerBits);
     
@@ -311,7 +360,17 @@ std::string extractMessage(const std::string& inputPath) {
     
     // Safety check
     if (messageLength > 65535 || messageLength <= 0) {
-        return "Error: Invalid message length detected: " + std::to_string(messageLength);
+        cudaEventDestroy(startGPU);
+        cudaEventDestroy(stopGPU);
+        
+        auto endTotal = std::chrono::high_resolution_clock::now();
+        float totalElapsedTime = std::chrono::duration<float, std::milli>(endTotal - startTotal).count();
+        
+        TimingInfo timing;
+        timing.gpuTime = gpuElapsedTime;
+        timing.totalTime = totalElapsedTime;
+        
+        return std::make_pair("Error: Invalid message length detected: " + std::to_string(messageLength), timing);
     }
     
     // Generate positions for the full message
@@ -335,8 +394,14 @@ std::string extractMessage(const std::string& inputPath) {
     // Calculate new grid size for message bits
     gridSize = (messageBits + blockSize - 1) / blockSize;
     
+    // Continue GPU timing
     // Launch kernel to extract message bits
     extractBitsKernel<<<gridSize, blockSize>>>(d_image, width, height, d_positions, d_bits, messageBits);
+    
+    // End GPU timing
+    cudaEventRecord(stopGPU);
+    cudaEventSynchronize(stopGPU);
+    cudaEventElapsedTime(&gpuElapsedTime, startGPU, stopGPU);
     
     // Copy the extracted bits back to host
     std::vector<unsigned char> messageBitsHost(messageBits);
@@ -360,16 +425,28 @@ std::string extractMessage(const std::string& inputPath) {
     cudaFree(d_positions);
     cudaFree(d_bits);
     
+    // Destroy CUDA events
+    cudaEventDestroy(startGPU);
+    cudaEventDestroy(stopGPU);
+    
+    // End total time measurement
+    auto endTotal = std::chrono::high_resolution_clock::now();
+    float totalElapsedTime = std::chrono::duration<float, std::milli>(endTotal - startTotal).count();
+    
+    TimingInfo timing;
+    timing.gpuTime = gpuElapsedTime;
+    timing.totalTime = totalElapsedTime;
+    
     // Convert bytes to string
     try {
         std::string message(messageBytes.begin(), messageBytes.end());
-        return message;
+        return std::make_pair(message, timing);
     } catch (const std::exception& e) {
         // If decoding fails, return hex representation
         std::stringstream hexData;
         for (size_t i = 0; i < std::min(messageBytes.size(), size_t(32)); i++) {
             hexData << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(messageBytes[i]);
         }
-        return "Error: Could not decode message. First 32 bytes in hex: " + hexData.str() + "...";
+        return std::make_pair("Error: Could not decode message. First 32 bytes in hex: " + hexData.str() + "...", timing);
     }
 }
